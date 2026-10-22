@@ -4,15 +4,14 @@ import pandas as pd
 import numpy as np
 import json
 import os
+from datetime import datetime, timedelta
 from openai import OpenAI
 
 # ================= 配置區 =================
-# 判斷是否在 Streamlit Cloud 上運行，優先讀取 Secrets
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    # 本地測試用：請在這裡填入你的 gsk_ 開頭 Key
-    RAW_API_KEY = "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" 
+    RAW_API_KEY = "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" # 本地測試用
 
 GROQ_API_KEY = RAW_API_KEY.encode("ascii", errors="ignore").decode("ascii").strip()
 
@@ -21,11 +20,21 @@ client = OpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 MODEL_NAME = "openai/gpt-oss-120b"
+
+# 【商業設定】付款連結
+PAYMENT_LINK = "https://your-payment-link.com" 
+
+# 【商業設定】授權碼與對應的到期日 (YYYY-MM-DD)
+# 未來客戶付款後，你可以手動在這裡新增一組，或者用腳本自動生成
+VALID_LICENSES = {
+    "PRO-TRIAL-7DAY": "2026-11-01", # 測試用：7天試用
+    "PRO-MONTH-2026": "2026-12-31", # 測試用：一個月
+    "VIP-DATA-2026": "2027-01-01"
+}
 # ==========================================
 
 st.set_page_config(page_title="Data Analyzer | 智能數據分析", page_icon="📊", layout="wide")
 
-# 自訂 CSS 讓介面更現代
 st.markdown("""
     <style>
     .stApp { max-width: 1100px; margin: 0 auto; }
@@ -47,14 +56,35 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "usage_count" not in st.session_state:
     st.session_state.usage_count = 0
+if "is_pro" not in st.session_state:
+    st.session_state.is_pro = False
+if "expiry_date" not in st.session_state:
+    st.session_state.expiry_date = None
 
 FREE_LIMIT = 3
 
-# 側邊欄
+# 檢查訂閱是否過期
+def check_subscription():
+    if st.session_state.is_pro and st.session_state.expiry_date:
+        today = datetime.now().date()
+        expiry = datetime.strptime(st.session_state.expiry_date, "%Y-%m-%d").date()
+        if today > expiry:
+            st.session_state.is_pro = False
+            st.session_state.expiry_date = None
+            return False
+    return st.session_state.is_pro
+
+is_subscribed = check_subscription()
+
+# 側邊欄 (包含上傳與訂閱)
 with st.sidebar:
     st.header("1. Upload Data | 上傳數據")
     
-    st.info(f"🎁 **Free Trial | 免費試用**\nRemaining: {max(0, FREE_LIMIT - st.session_state.usage_count)} / {FREE_LIMIT} times\n剩餘次數：{max(0, FREE_LIMIT - st.session_state.usage_count)} / {FREE_LIMIT} 次")
+    # 【訂閱狀態顯示】
+    if is_subscribed:
+        st.success(f"👑 **Pro Member | 專業版會員**\nValid until | 到期日：{st.session_state.expiry_date}\nUnlimited usage | 無限次數")
+    else:
+        st.info(f"🎁 **Free Trial | 免費試用**\nRemaining: {max(0, FREE_LIMIT - st.session_state.usage_count)} / {FREE_LIMIT} times\n剩餘次數：{max(0, FREE_LIMIT - st.session_state.usage_count)} / {FREE_LIMIT} 次")
     
     uploaded_file = st.file_uploader("Upload Excel or CSV | 選擇 Excel 或 CSV", type=["xlsx", "csv"])
     
@@ -63,14 +93,12 @@ with st.sidebar:
             if uploaded_file.name.endswith('.xlsx'):
                 df = pd.read_excel(uploaded_file)
             else:
-                # 修復：自動處理 CSV 的編碼問題 (UTF-8 或 台灣常用的 Big5)
                 try:
                     df = pd.read_csv(uploaded_file, encoding='utf-8')
                 except UnicodeDecodeError:
                     uploaded_file.seek(0)
                     df = pd.read_csv(uploaded_file, encoding='big5')
             
-            # 清理欄位名稱的隱藏空白
             df.columns = df.columns.str.strip()
             st.session_state.df = df
             st.success(f"✅ Loaded | 已載入：{uploaded_file.name} ({len(df)} rows)")
@@ -87,6 +115,31 @@ with st.sidebar:
             st.session_state.usage_count = 0
             st.rerun()
 
+    st.divider()
+    
+    # 【付費解鎖區塊】
+    if not is_subscribed:
+        st.markdown("### 🔓 Upgrade to Pro | 升級專業版")
+        st.markdown("Unlock unlimited analyses.\n解鎖無限次數分析。")
+        st.link_button("💳 Pay Now | 立即付款", PAYMENT_LINK)
+        
+        license_input = st.text_input("Enter License Key | 輸入授權碼", type="password")
+        if st.button("Activate | 啟用"):
+            key = license_input.strip()
+            if key in VALID_LICENSES:
+                expiry_str = VALID_LICENSES[key]
+                expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+                if expiry_date >= datetime.now().date():
+                    st.session_state.is_pro = True
+                    st.session_state.expiry_date = expiry_str
+                    st.success("✅ Activated! | 啟用成功！")
+                    st.rerun()
+                else:
+                    st.error("❌ Key Expired | 此授權碼已過期，請續費。")
+            else:
+                st.error("❌ Invalid Key | 授權碼錯誤")
+
+
 # 核心計算函數 (泛用防呆版)
 def execute_local(df, plan):
     d = df.copy()
@@ -94,7 +147,6 @@ def execute_local(df, plan):
     gb = plan.get("group_by")
     target = plan.get("target_col")
     
-    # 處理 AI 可能回傳 List 的防呆
     if isinstance(gb, list): gb = gb[0] if len(gb) > 0 else None
     if isinstance(gb, str):
         gb = gb.strip()
@@ -105,19 +157,14 @@ def execute_local(df, plan):
         target = target.strip()
         if target in ["null", "None", "無", ""]: target = None
 
-    # 如果 AI 沒給目標欄位，嘗試找一個數值欄位
     if not target:
         num_cols = d.select_dtypes(include=[np.number]).columns.tolist()
-        if num_cols:
-            target = num_cols[0]
-        else:
-            return pd.DataFrame([{"提示": "找不到可計算的數值欄位 (No numerical column found)"}]), None
+        if num_cols: target = num_cols[0]
+        else: return pd.DataFrame([{"提示": "找不到可計算的數值欄位"}]), None
 
-    # 確保目標欄位存在
     if target not in d.columns:
-        raise ValueError(f"找不到欄位：{target} (Column not found)")
+        raise ValueError(f"找不到欄位：{target}")
 
-    # 如果沒有有效的分組欄位，直接回傳整體統計
     if not gb or gb not in d.columns:
         if op in ["groupby_mean", "rank"]:
             return pd.DataFrame([{f"{target} 平均值": d[target].mean()}]), None
@@ -126,7 +173,6 @@ def execute_local(df, plan):
         else:
             return pd.DataFrame([{f"{target} 總數": d[target].count()}]), None
 
-    # 執行分組分析
     if op == "groupby_mean":
         agg = d.groupby(gb)[target].mean().reset_index()
         return agg.sort_values(by=target, ascending=False).head(10), gb
@@ -144,18 +190,16 @@ def execute_local(df, plan):
 
 # 主畫面
 if st.session_state.df is not None:
-    # 顯示歷史對話 (包含圖表與白箱)
+    # 顯示歷史對話
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             
-            # 顯示圖表
             if "chart_data" in message:
                 chart_data = pd.DataFrame(message["chart_data"])
                 if message.get("x_col") and message.get("target_col"):
                     st.bar_chart(data=chart_data, x=message["x_col"], y=message["target_col"], color="#2FA572")
             
-            # 顯示白箱
             if "whitebox_plan" in message and "whitebox_df" in message:
                 with st.expander("🔍 White Box | 白箱計算依據"):
                     st.markdown("**第一步：AI 分析計畫**")
@@ -163,14 +207,17 @@ if st.session_state.df is not None:
                     st.markdown("**第二步：本地端執行計算**")
                     st.dataframe(pd.DataFrame(message["whitebox_df"]), use_container_width=True)
 
-    # 檢查額度
-    if st.session_state.usage_count >= FREE_LIMIT:
+    # 【付費阻擋邏輯】
+    if not is_subscribed and st.session_state.usage_count >= FREE_LIMIT:
         st.warning("⚠️ **Free trial limit reached. | 免費試用次數已達上限。**\n\nPlease upgrade to Pro to continue analyzing. | 請升級至 Pro 版本以繼續分析。")
-        st.markdown("[👉 Upgrade Now | 立即升級](https://your-payment-link.com)") 
+        st.markdown(f"👈 **請在左側選單付款並輸入授權碼解鎖。**\n\n[👉 Click here to Pay | 點此前往付款]({PAYMENT_LINK})")
     else:
         # 輸入框
-        if question := st.chat_input("Ask a question... | 輸入您的問題（例如：哪條路線預估時間最長？）"):
-            st.session_state.usage_count += 1 
+        if question := st.chat_input("Ask a question... | 輸入您的問題"):
+            # 如果不是 Pro，才增加次數
+            if not is_subscribed:
+                st.session_state.usage_count += 1 
+                
             with st.chat_message("user"):
                 st.markdown(question)
             st.session_state.messages.append({"role": "user", "content": question})
@@ -218,7 +265,6 @@ if st.session_state.df is not None:
                             st.markdown(conclusion)
                             
                             chart_data = result_df.to_dict(orient="records")
-                            # 存入歷史紀錄，包含白箱
                             st.session_state.messages.append({
                                 "role": "assistant", 
                                 "content": conclusion,
@@ -229,11 +275,9 @@ if st.session_state.df is not None:
                                 "whitebox_df": chart_data
                             })
                             
-                            # 畫圖表
                             if x_col and target_col and target_col in result_df.columns:
                                 st.bar_chart(data=result_df, x=x_col, y=target_col, color="#2FA572")
                             
-                            # 立即顯示白箱
                             with st.expander("🔍 White Box | 白箱計算依據", expanded=False):
                                 st.markdown("**第一步：AI 分析計畫**")
                                 st.json(plan)
@@ -244,7 +288,5 @@ if st.session_state.df is not None:
                     except Exception as e:
                         st.error(f"Error: {e}")
 else:
-    st.info("👈 Please upload a file to start | 請先在左側上傳檔案開始分析。")   
-    
-
+    st.info("👈 Please upload a file to start | 請先在左側上傳檔案開始分析。")
 ##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
