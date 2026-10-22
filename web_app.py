@@ -3,13 +3,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import json
+import os
 from openai import OpenAI
 
 # ================= 配置區 =================
+# 判斷是否在 Streamlit Cloud 上運行，優先讀取 Secrets
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    RAW_API_KEY = "gsk_你的Groq密钥" # 本地測試用
+    # 本地測試用：請在這裡填入你的 gsk_ 開頭 Key
+    RAW_API_KEY = "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" 
 
 GROQ_API_KEY = RAW_API_KEY.encode("ascii", errors="ignore").decode("ascii").strip()
 
@@ -22,7 +25,7 @@ MODEL_NAME = "openai/gpt-oss-120b"
 
 st.set_page_config(page_title="Data Analyzer | 智能數據分析", page_icon="📊", layout="wide")
 
-# 自訂 CSS
+# 自訂 CSS 讓介面更現代
 st.markdown("""
     <style>
     .stApp { max-width: 1100px; margin: 0 auto; }
@@ -32,7 +35,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 中英文對照標題
 st.title("📊 Data Analyzer | 智能數據分析工具")
 st.markdown("🔒 **Local Computing · Data Privacy Guaranteed** | **本地端計算 · 數據絕對安全**")
 st.markdown("*No raw data is sent to the cloud. | 原始數據不會上傳至雲端。*")
@@ -61,14 +63,14 @@ with st.sidebar:
             if uploaded_file.name.endswith('.xlsx'):
                 df = pd.read_excel(uploaded_file)
             else:
-                # 處理 CSV 可能的編碼問題 (utf-8 或 big5)
+                # 修復：自動處理 CSV 的編碼問題 (UTF-8 或 台灣常用的 Big5)
                 try:
                     df = pd.read_csv(uploaded_file, encoding='utf-8')
                 except UnicodeDecodeError:
                     uploaded_file.seek(0)
                     df = pd.read_csv(uploaded_file, encoding='big5')
             
-            # 清理欄位名稱空白
+            # 清理欄位名稱的隱藏空白
             df.columns = df.columns.str.strip()
             st.session_state.df = df
             st.success(f"✅ Loaded | 已載入：{uploaded_file.name} ({len(df)} rows)")
@@ -85,14 +87,14 @@ with st.sidebar:
             st.session_state.usage_count = 0
             st.rerun()
 
-# 核心計算函數 (完全泛用版)
+# 核心計算函數 (泛用防呆版)
 def execute_local(df, plan):
     d = df.copy()
     op = plan.get("operator")
     gb = plan.get("group_by")
     target = plan.get("target_col")
     
-    # 防呆：處理 AI 回傳 List 的情況
+    # 處理 AI 可能回傳 List 的防呆
     if isinstance(gb, list): gb = gb[0] if len(gb) > 0 else None
     if isinstance(gb, str):
         gb = gb.strip()
@@ -140,19 +142,28 @@ def execute_local(df, plan):
     else:
         return d.head(10), None
 
-
 # 主畫面
 if st.session_state.df is not None:
-    # 顯示歷史對話
+    # 顯示歷史對話 (包含圖表與白箱)
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            
+            # 顯示圖表
             if "chart_data" in message:
                 chart_data = pd.DataFrame(message["chart_data"])
-                if message["x_col"] and message.get("target_col"):
+                if message.get("x_col") and message.get("target_col"):
                     st.bar_chart(data=chart_data, x=message["x_col"], y=message["target_col"], color="#2FA572")
+            
+            # 顯示白箱
+            if "whitebox_plan" in message and "whitebox_df" in message:
+                with st.expander("🔍 White Box | 白箱計算依據"):
+                    st.markdown("**第一步：AI 分析計畫**")
+                    st.json(message["whitebox_plan"])
+                    st.markdown("**第二步：本地端執行計算**")
+                    st.dataframe(pd.DataFrame(message["whitebox_df"]), use_container_width=True)
 
-    # 檢查是否還有額度
+    # 檢查額度
     if st.session_state.usage_count >= FREE_LIMIT:
         st.warning("⚠️ **Free trial limit reached. | 免費試用次數已達上限。**\n\nPlease upgrade to Pro to continue analyzing. | 請升級至 Pro 版本以繼續分析。")
         st.markdown("[👉 Upgrade Now | 立即升級](https://your-payment-link.com)") 
@@ -187,7 +198,6 @@ if st.session_state.df is not None:
                         
                         if result_df is not None and not result_df.empty:
                             target_col = plan.get("target_col")
-                            # 如果 AI 沒有指定 target_col，嘗試從結果中找
                             if not target_col or target_col not in result_df.columns:
                                 if len(result_df.columns) > 1:
                                     target_col = result_df.columns[-1] 
@@ -208,26 +218,33 @@ if st.session_state.df is not None:
                             st.markdown(conclusion)
                             
                             chart_data = result_df.to_dict(orient="records")
+                            # 存入歷史紀錄，包含白箱
                             st.session_state.messages.append({
                                 "role": "assistant", 
                                 "content": conclusion,
                                 "chart_data": chart_data,
                                 "x_col": x_col,
-                                "target_col": target_col
+                                "target_col": target_col,
+                                "whitebox_plan": plan,
+                                "whitebox_df": chart_data
                             })
                             
                             # 畫圖表
                             if x_col and target_col and target_col in result_df.columns:
                                 st.bar_chart(data=result_df, x=x_col, y=target_col, color="#2FA572")
                             
-                            with st.expander("🔍 White Box | 白箱計算依據"):
+                            # 立即顯示白箱
+                            with st.expander("🔍 White Box | 白箱計算依據", expanded=False):
+                                st.markdown("**第一步：AI 分析計畫**")
                                 st.json(plan)
+                                st.markdown("**第二步：本地端執行計算**")
                                 st.dataframe(result_df, use_container_width=True)
                         else:
                             st.error("No results generated | 無法生成結果")
                     except Exception as e:
                         st.error(f"Error: {e}")
 else:
-    st.info("👈 Please upload a file to start | 請先在左側上傳檔案開始分析。")
+    st.info("👈 Please upload a file to start | 請先在左側上傳檔案開始分析。")   
+    
 
-    ##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
+##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
