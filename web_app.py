@@ -9,7 +9,7 @@ from openai import OpenAI
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    RAW_API_KEY = "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" # 本地測試用
+    RAW_API_KEY = "gsk_你的Groq密钥" # 本地測試用
 
 GROQ_API_KEY = RAW_API_KEY.encode("ascii", errors="ignore").decode("ascii").strip()
 
@@ -20,7 +20,6 @@ client = OpenAI(
 MODEL_NAME = "openai/gpt-oss-120b"
 # ==========================================
 
-# 設定網頁標題與圖標
 st.set_page_config(page_title="Data Analyzer | 智能數據分析", page_icon="📊", layout="wide")
 
 # 自訂 CSS
@@ -45,7 +44,7 @@ if "df" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "usage_count" not in st.session_state:
-    st.session_state.usage_count = 0 # 追蹤使用次數
+    st.session_state.usage_count = 0
 
 FREE_LIMIT = 3
 
@@ -53,7 +52,6 @@ FREE_LIMIT = 3
 with st.sidebar:
     st.header("1. Upload Data | 上傳數據")
     
-    # 顯示剩餘次數
     st.info(f"🎁 **Free Trial | 免費試用**\nRemaining: {max(0, FREE_LIMIT - st.session_state.usage_count)} / {FREE_LIMIT} times\n剩餘次數：{max(0, FREE_LIMIT - st.session_state.usage_count)} / {FREE_LIMIT} 次")
     
     uploaded_file = st.file_uploader("Upload Excel or CSV | 選擇 Excel 或 CSV", type=["xlsx", "csv"])
@@ -63,8 +61,14 @@ with st.sidebar:
             if uploaded_file.name.endswith('.xlsx'):
                 df = pd.read_excel(uploaded_file)
             else:
-                df = pd.read_csv(uploaded_file)
+                # 處理 CSV 可能的編碼問題 (utf-8 或 big5)
+                try:
+                    df = pd.read_csv(uploaded_file, encoding='utf-8')
+                except UnicodeDecodeError:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, encoding='big5')
             
+            # 清理欄位名稱空白
             df.columns = df.columns.str.strip()
             st.session_state.df = df
             st.success(f"✅ Loaded | 已載入：{uploaded_file.name} ({len(df)} rows)")
@@ -81,104 +85,123 @@ with st.sidebar:
             st.session_state.usage_count = 0
             st.rerun()
 
-# 核心計算函數
+# 核心計算函數 (完全泛用版)
 def execute_local(df, plan):
     d = df.copy()
     op = plan.get("operator")
     gb = plan.get("group_by")
+    target = plan.get("target_col")
     
+    # 防呆：處理 AI 回傳 List 的情況
     if isinstance(gb, list): gb = gb[0] if len(gb) > 0 else None
     if isinstance(gb, str):
         gb = gb.strip()
         if gb in ["null", "None", "無", ""]: gb = None
+        
+    if isinstance(target, list): target = target[0] if len(target) > 0 else None
+    if isinstance(target, str):
+        target = target.strip()
+        if target in ["null", "None", "無", ""]: target = None
 
-    rev_col = next((c for c in d.columns if 'revenue' in str(c).lower() or '銷售' in str(c) or '收入' in str(c)), None)
-    cost_col = next((c for c in d.columns if 'cost' in str(c).lower() or '成本' in str(c)), None)
-    return_col = next((c for c in d.columns if 'return' in str(c).lower() or '退貨' in str(c)), None)
-
-    if not rev_col: raise ValueError("Missing revenue column | 找不到銷售額欄位")
-
-    if return_col:
-        is_return = d[return_col].astype(str).str.contains('是|1|True|true', case=False, na=False)
-        d['_net_rev'] = np.where(is_return, 0, d[rev_col])
-    else:
-        d['_net_rev'] = d[rev_col]
-
-    if cost_col:
-        d['_profit'] = d['_net_rev'] - d[cost_col]
-    else:
-        d['_profit'] = d['_net_rev']
-
-    if gb is None or gb not in d.columns:
-        return pd.DataFrame([{"Net Revenue": d['_net_rev'].sum(), "Profit": d['_profit'].sum()}]), None
-
-    if op == "breakdown":
-        agg = d.groupby(gb).agg(Net_Revenue=('_net_rev', 'sum'), Profit=('_profit', 'sum')).reset_index()
-        agg['Margin'] = (agg['Profit'] / agg['Net_Revenue'].replace(0, np.nan)).round(3)
-        return agg.sort_values('Profit').head(10), gb
-    elif op == "quality" and return_col:
-        d['_is_return'] = is_return.astype(int)
-        agg = d.groupby(gb).agg(Orders=('_net_rev', 'count'), Returns=('_is_return', 'sum')).reset_index()
-        agg['Return_Rate'] = (agg['Returns'] / agg['Orders']).round(3)
-        return agg.sort_values('Return_Rate', ascending=False).head(10), gb
-    elif op == "trend":
-        time_col = next((c for c in d.columns if 'date' in str(c).lower() or '日期' in str(c) or '時間' in str(c)), None)
-        if time_col:
-            d[time_col] = pd.to_datetime(d[time_col], errors='coerce')
-            d['_month'] = d[time_col].dt.to_period('M').astype(str)
-            agg = d.groupby('_month').agg(Net_Revenue=('_net_rev', 'sum'), Profit=('_profit', 'sum')).reset_index()
-            return agg, "_month"
+    # 如果 AI 沒給目標欄位，嘗試找一個數值欄位
+    if not target:
+        num_cols = d.select_dtypes(include=[np.number]).columns.tolist()
+        if num_cols:
+            target = num_cols[0]
         else:
-            agg = d.groupby(gb).agg(Profit=('_profit', 'sum')).reset_index()
-            return agg.sort_values('Profit').head(10), gb
+            return pd.DataFrame([{"提示": "找不到可計算的數值欄位 (No numerical column found)"}]), None
+
+    # 確保目標欄位存在
+    if target not in d.columns:
+        raise ValueError(f"找不到欄位：{target} (Column not found)")
+
+    # 如果沒有有效的分組欄位，直接回傳整體統計
+    if not gb or gb not in d.columns:
+        if op in ["groupby_mean", "rank"]:
+            return pd.DataFrame([{f"{target} 平均值": d[target].mean()}]), None
+        elif op == "groupby_sum":
+            return pd.DataFrame([{f"{target} 總和": d[target].sum()}]), None
+        else:
+            return pd.DataFrame([{f"{target} 總數": d[target].count()}]), None
+
+    # 執行分組分析
+    if op == "groupby_mean":
+        agg = d.groupby(gb)[target].mean().reset_index()
+        return agg.sort_values(by=target, ascending=False).head(10), gb
+    elif op == "groupby_sum":
+        agg = d.groupby(gb)[target].sum().reset_index()
+        return agg.sort_values(by=target, ascending=False).head(10), gb
+    elif op == "groupby_count":
+        agg = d.groupby(gb)[target].count().reset_index()
+        return agg.sort_values(by=target, ascending=False).head(10), gb
+    elif op == "rank":
+        agg = d.groupby(gb)[target].mean().reset_index()
+        return agg.sort_values(by=target, ascending=False).head(10), gb
     else:
-        agg = d.groupby(gb).agg(Profit=('_profit', 'sum')).reset_index()
-        return agg.sort_values('Profit').head(10), gb
+        return d.head(10), None
+
 
 # 主畫面
 if st.session_state.df is not None:
+    # 顯示歷史對話
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if "chart_data" in message:
                 chart_data = pd.DataFrame(message["chart_data"])
-                if "Profit" in chart_data.columns:
-                    st.bar_chart(data=chart_data, x=message["x_col"], y="Profit", color="#2FA572")
-                elif "Return_Rate" in chart_data.columns:
-                    st.bar_chart(data=chart_data, x=message["x_col"], y="Return_Rate", color="#FF4B4B")
+                if message["x_col"] and message.get("target_col"):
+                    st.bar_chart(data=chart_data, x=message["x_col"], y=message["target_col"], color="#2FA572")
 
     # 檢查是否還有額度
     if st.session_state.usage_count >= FREE_LIMIT:
         st.warning("⚠️ **Free trial limit reached. | 免費試用次數已達上限。**\n\nPlease upgrade to Pro to continue analyzing. | 請升級至 Pro 版本以繼續分析。")
-        st.markdown("[👉 Upgrade Now | 立即升級](https://your-payment-link.com)") # 替換成你的付款連結
+        st.markdown("[👉 Upgrade Now | 立即升級](https://your-payment-link.com)") 
     else:
-        # 輸入框 (支援中英文)
-        if question := st.chat_input("Ask a question... | 輸入您的問題（例如：哪個品類在虧錢？）"):
-            st.session_state.usage_count += 1 # 增加使用次數
+        # 輸入框
+        if question := st.chat_input("Ask a question... | 輸入您的問題（例如：哪條路線預估時間最長？）"):
+            st.session_state.usage_count += 1 
             with st.chat_message("user"):
                 st.markdown(question)
             st.session_state.messages.append({"role": "user", "content": question})
             
             with st.chat_message("assistant"):
-                with st.spinner("Analyzing | 正在分析中..."):
+                with st.spinner("Analyzing | 正在理解問題並計算..."):
                     try:
                         columns = list(st.session_state.df.columns)
-                        prompt = f"Columns: {columns}\nQuestion: {question}\nReturn strict JSON with: operator, group_by, measure_cols, assumptions, plain_explanation. Explain in Chinese and English."
+                        
+                        prompt_part1 = "表列名：" + str(columns) + "\n"
+                        prompt_part2 = "用戶的問題：" + question + "\n"
+                        prompt_part3 = "請判斷要用哪種分析。只能選這五個英文單字之一：groupby_mean (分組算平均), groupby_sum (分組加總), groupby_count (分組算數量), trend (看時間趨勢), rank (排名)。\n"
+                        prompt_part4 = '只返回嚴格的 JSON 格式，包含欄位：operator, group_by, target_col (要計算的數值欄位), assumptions, plain_explanation。請全部使用繁體中文填寫解釋部分。'
+                        
+                        full_prompt = prompt_part1 + prompt_part2 + prompt_part3 + prompt_part4
                         
                         resp = client.chat.completions.create(
                             model=MODEL_NAME,
-                            messages=[{"role": "user", "content": prompt}],
+                            messages=[{"role": "user", "content": full_prompt}],
                             response_format={"type": "json_object"}
                         )
                         plan = json.loads(resp.choices[0].message.content)
-                        
+
                         result_df, x_col = execute_local(st.session_state.df, plan)
                         
                         if result_df is not None and not result_df.empty:
-                            conc_prompt = f"Question: {question}\nLogic: {plan.get('plain_explanation', '')}\nData:\n{result_df.head(5).to_string()}\nWrite 3 points (Findings, Basis, Suggestion) in both Traditional Chinese and English. Max 100 words."
+                            target_col = plan.get("target_col")
+                            # 如果 AI 沒有指定 target_col，嘗試從結果中找
+                            if not target_col or target_col not in result_df.columns:
+                                if len(result_df.columns) > 1:
+                                    target_col = result_df.columns[-1] 
+                            
+                            conc_part1 = "用戶問：" + question + "\n"
+                            conc_part2 = "計算邏輯：" + str(plan.get('plain_explanation', '')) + "\n"
+                            conc_part3 = "結果數據：\n" + result_df.head(10).to_string() + "\n"
+                            conc_part4 = "請寫出老闆能看懂的三段話，總字數不超過 150 字：發現(帶數字)、依據、建議。請使用繁體中文回答。"
+                            
+                            full_conc_prompt = conc_part1 + conc_part2 + conc_part3 + conc_part4
+                            
                             resp2 = client.chat.completions.create(
                                 model=MODEL_NAME,
-                                messages=[{"role": "user", "content": conc_prompt}]
+                                messages=[{"role": "user", "content": full_conc_prompt}]
                             )
                             conclusion = resp2.choices[0].message.content.strip()
                             
@@ -186,15 +209,16 @@ if st.session_state.df is not None:
                             
                             chart_data = result_df.to_dict(orient="records")
                             st.session_state.messages.append({
-                                "role": "assistant", "content": conclusion,
-                                "chart_data": chart_data, "x_col": x_col
+                                "role": "assistant", 
+                                "content": conclusion,
+                                "chart_data": chart_data,
+                                "x_col": x_col,
+                                "target_col": target_col
                             })
                             
-                            if x_col:
-                                if "Profit" in result_df.columns:
-                                    st.bar_chart(data=result_df, x=x_col, y="Profit", color="#2FA572")
-                                elif "Return_Rate" in result_df.columns:
-                                    st.bar_chart(data=result_df, x=x_col, y="Return_Rate", color="#FF4B4B")
+                            # 畫圖表
+                            if x_col and target_col and target_col in result_df.columns:
+                                st.bar_chart(data=result_df, x=x_col, y=target_col, color="#2FA572")
                             
                             with st.expander("🔍 White Box | 白箱計算依據"):
                                 st.json(plan)
@@ -205,6 +229,5 @@ if st.session_state.df is not None:
                         st.error(f"Error: {e}")
 else:
     st.info("👈 Please upload a file to start | 請先在左側上傳檔案開始分析。")
-
 
     ##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
