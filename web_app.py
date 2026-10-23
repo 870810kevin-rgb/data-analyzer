@@ -11,18 +11,17 @@ from openai import OpenAI
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    RAW_API_KEY = "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" 
+    RAW_API_KEY = "gsk_你的Groq密钥" 
+
 client = OpenAI(api_key=RAW_API_KEY.strip(), base_url="https://api.groq.com/openai/v1")
 MODEL_NAME = "openai/gpt-oss-120b"
 
 # 2. 金流付款連結
 PAYMENT_LINK = "https://your-payment-link.com" 
 
-# 3. 【付費會員名單】對應的 Email 與到期日
-# 實務上客戶刷卡後，你收到通知，就在這裡加上他的 Email
+# 3. 【付費會員名單】對應的 Email 與到期日 (YYYY-MM-DD)
 PAID_USERS = {
-    "boss@example.com": "2026-12-31", # 測試用：老闆的 Email
-    "user2@gmail.com": "2027-01-01"
+    "boss@example.com": "2026-12-31", 
 }
 FREE_LIMIT = 3
 # ==========================================
@@ -42,51 +41,68 @@ st.title("📊 Data Analyzer | 智能數據分析工具")
 st.markdown("🔒 **Local Computing · Data Privacy Guaranteed** | **本地端計算 · 數據絕對安全**")
 st.divider()
 
-# 初始化狀態
+# ================= 會員狀態與登入邏輯 =================
+# 檢查是否已登入 (使用 Streamlit 原生 OIDC)
+is_logged_in = st.user.is_logged_in if hasattr(st.user, "is_logged_in") else False
+user_email = st.user.email if is_logged_in else None
+
+# 初始化 Session State
+if "usage_count" not in st.session_state:
+    st.session_state.usage_count = 0
 if "df" not in st.session_state:
     st.session_state.df = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "usage_count" not in st.session_state:
+if "last_login_email" not in st.session_state:
+    st.session_state.last_login_email = None
+
+# 如果換了帳號登入，重置使用次數與資料
+if is_logged_in and user_email != st.session_state.last_login_email:
     st.session_state.usage_count = 0
+    st.session_state.df = None
+    st.session_state.messages = []
+    st.session_state.last_login_email = user_email
 
-# ================= 核心會員驗證邏輯 =================
-is_logged_in = st.user.is_logged_in
-user_email = st.user.email if is_logged_in else None
-
-# 判斷是否為付費會員 (比對 Email 與到期日)
+# 判斷是否為付費會員
 is_paid = False
 if is_logged_in and user_email in PAID_USERS:
     expiry = datetime.strptime(PAID_USERS[user_email], "%Y-%m-%d").date()
     if datetime.now().date() <= expiry:
         is_paid = True
 
-# 判斷是否還有免費額度
 has_free_quota = (not is_paid) and (st.session_state.usage_count < FREE_LIMIT)
 
-# 側邊欄
+# ================= 側邊欄 =================
 with st.sidebar:
-    # 登入/登出區塊
+    st.header("👤 Account | 帳號")
+    
+    # 登入狀態
     if not is_logged_in:
-        st.warning("👤 **Please login to use. | 請先登入以使用服務。**")
-        if st.button("Login with Google | 使用 Google 登入"):
-            st.login() # 觸發 Google 登入
+        st.warning("Please login to use the service.\n請先登入以使用服務。")
+        if st.button("Login with Google | Google 登入"):
+            st.login("google") # 強制指定 provider 為 google
     else:
-        st.success(f"👤 **Logged in as | 登入身分：**\n{user_email}")
+        st.success(f"Logged in as:\n**{user_email}**")
         if st.button("Logout | 登出"):
             st.logout()
             st.rerun()
 
     st.divider()
     
-    # 狀態顯示
+    # 訂閱狀態
     if is_paid:
         st.success("👑 **Pro Member | 專業版會員**\nUnlimited usage | 無限次數使用")
     elif is_logged_in:
         st.info(f"🎁 **Free Trial | 免費試用**\nRemaining: {max(0, FREE_LIMIT - st.session_state.usage_count)} / {FREE_LIMIT} times\n剩餘次數：{max(0, FREE_LIMIT - st.session_state.usage_count)} / {FREE_LIMIT} 次")
     
-    st.header("1. Upload Data | 上傳數據")
-    uploaded_file = st.file_uploader("Upload Excel or CSV | 選擇 Excel 或 CSV", type=["xlsx", "csv"])
+    st.header("📂 Upload Data | 上傳數據")
+    
+    # 【修復】未登入不能上傳
+    if not is_logged_in:
+        st.info("Please login first.\n請先登入才能上傳數據。")
+        uploaded_file = None
+    else:
+        uploaded_file = st.file_uploader("Upload Excel or CSV", type=["xlsx", "csv"])
     
     if uploaded_file is not None:
         try:
@@ -101,9 +117,9 @@ with st.sidebar:
             
             df.columns = df.columns.str.strip()
             st.session_state.df = df
-            st.success(f"✅ Loaded | 已載入：{uploaded_file.name} ({len(df)} rows)")
+            st.success(f"✅ Loaded: {uploaded_file.name} ({len(df)} rows)")
         except Exception as e:
-            st.error(f"Error | 讀取失敗：{e}")
+            st.error(f"Error: {e}")
             
     if st.session_state.df is not None:
         if st.button("🗑️ Clear Data | 清除數據"):
@@ -117,10 +133,10 @@ with st.sidebar:
         st.markdown("### 🔓 Upgrade to Pro | 升級專業版")
         st.markdown("Unlock unlimited analyses.\n解鎖無限次數分析。")
         st.link_button("💳 Pay Now | 立即付款", PAYMENT_LINK)
-        st.caption("After payment, your account will be upgraded within 24 hours.\n付款後 24 小時內將為您開通。")
+        st.caption("Account will be upgraded manually within 24 hrs.\n付款後 24 小時內將為您開通。")
 
 
-# 核心計算函數
+# ================= 核心計算函數 =================
 def execute_local(df, plan):
     d = df.copy()
     op = plan.get("operator")
@@ -160,9 +176,9 @@ def execute_local(df, plan):
     else:
         return d.head(10), None
 
-# 主畫面
+# ================= 主畫面 =================
 if not is_logged_in:
-    st.info("👈 Please login using the sidebar to start. | 請先由左側選單登入以開始使用。")
+    st.info("👈 Please login using the sidebar to start.\n請先由左側選單登入以開始使用。")
 else:
     if st.session_state.df is not None:
         # 顯示歷史對話
