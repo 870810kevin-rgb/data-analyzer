@@ -11,7 +11,7 @@ from openai import OpenAI
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    RAW_API_KEY = "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" # 本地測試用
+    RAW_API_KEY = "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" # 本地測試用
 
 # 初始化 Groq Client
 client = OpenAI(api_key=RAW_API_KEY.strip(), base_url="https://api.groq.com/openai/v1")
@@ -338,4 +338,4 @@ if st.session_state.df is not None:
             st.info("You have used all your free quotas. Please login to upgrade. | 您的免費額度已用完，請登入升級。")
 else:
     st.info("👈 Please upload a file to start | 請先在左側上傳檔案開始分析。")
-##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
+##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
