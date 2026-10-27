@@ -26,11 +26,9 @@ os.environ["NO_PROXY"] = "*"
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    RAW_API_KEY = "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" 
+    RAW_API_KEY = "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" # 本地測試用
 
-# 強制清洗 API Key 確保沒有隱藏字元
 GROQ_API_KEY = RAW_API_KEY.encode("ascii", errors="ignore").decode("ascii").strip()
-
 client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 MODEL_NAME = "openai/gpt-oss-120b"
 
@@ -40,8 +38,19 @@ FREE_LIMIT = 3
 # ==========================================
 
 st.set_page_config(page_title="Data Analyzer | 智能數據分析", page_icon="📊", layout="wide")
+
+st.markdown("""
+    <style>
+    .stApp { max-width: 1100px; margin: 0 auto; }
+    .stButton>button { width: 100%; border-radius: 8px; height: 50px; font-weight: bold; }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
+
 st.title("📊 Data Analyzer | 智能數據分析工具")
 st.markdown("🔒 **Local Computing · Data Privacy Guaranteed** | **本地端計算 · 數據絕對安全**")
+st.markdown("🚀 **New: Predictive Trend & Anomaly Detection** | **全新：趨勢預測與異常檢測**")
 st.divider()
 
 # ================= 核心狀態管理 =================
@@ -100,6 +109,7 @@ with st.sidebar:
             df.columns = df.columns.str.strip()
             st.session_state.df = df
             st.success(f"✅ Loaded: {uploaded_file.name}")
+            st.markdown(f"**Data Dimensions | 數據維度：** `{len(df)} rows` × `{len(df.columns)} columns`")
             with st.expander("🔍 Preview Data (前 5 行)"): st.dataframe(df.head(), use_container_width=True)
         except Exception as e: st.error(f"Error: {e}")
             
@@ -132,14 +142,21 @@ def execute_local(df, plan):
     d[target] = pd.to_numeric(d[target], errors='coerce').fillna(0)
 
     if op == "trend":
-        time_col = next((c for c in d.columns if 'date' in str(c).lower() or '日期' in str(c) or '時間' in str(c)), None)
+        # 【優化】擴充時間欄位的辨識能力，包含「年」、「月」、「季」
+        time_col = next((c for c in d.columns if 'date' in str(c).lower() or '日期' in str(c) or '時間' in str(c) or '年' in str(c) or '月' in str(c)), None)
         if time_col:
-            d[time_col] = pd.to_datetime(d[time_col], errors='coerce')
-            d['_month'] = d[time_col].dt.to_period('M').astype(str)
+            # 嘗試轉換為日期格式，若失敗則保留原字串
+            try:
+                d[time_col] = pd.to_datetime(d[time_col], errors='coerce')
+                d['_month'] = d[time_col].dt.to_period('M').astype(str)
+            except:
+                d['_month'] = d[time_col].astype(str)
+                
             agg = d.groupby('_month')[target].agg(['sum', 'mean', 'count']).reset_index()
             agg.columns = ['_month', f'{target}_sum', f'{target}_mean', f'{target}_count']
             return agg, "_month"
-        else: return pd.DataFrame([{"提示": "找不到日期欄位"}]), None
+        else: 
+            return pd.DataFrame([{"提示": "找不到時間或年份欄位，無法進行趨勢分析"}]), None
 
     elif op == "groupby_ratio" and gb and gb in d.columns:
         agg = d.groupby(gb)[target].sum().reset_index()
@@ -196,11 +213,9 @@ if st.session_state.df is not None:
             with st.chat_message("assistant"):
                 with st.spinner("Analyzing | 正在深度分析與計算..."):
                     try:
-                        # 【修復重點】將 DataFrame 轉為 JSON 字串前，確保編碼正確
                         sample_data = st.session_state.df.head(3).to_dict(orient="records")
                         col_info = [f"{col}({'數值' if pd.api.types.is_numeric_dtype(st.session_state.df[col]) else '文字'})" for col in st.session_state.df.columns]
                         
-                        # 將 Prompt 轉為純字串
                         prompt = f"""你是一個數據分析專家。請根據以下資訊生成分析計畫。
 【欄位】{', '.join(col_info)}
 【樣本】{str(sample_data)}
@@ -232,7 +247,6 @@ if st.session_state.df is not None:
                             elif f'{target_col}_mean' in result_df.columns: y_col_for_chart = f'{target_col}_mean'
                             elif f'{target_col}_count' in result_df.columns: y_col_for_chart = f'{target_col}_count'
                             
-                            # 確保結論 Prompt 轉為純字串
                             conc_prompt = f"""你是一位專業的數據分析師。
 用戶問：{question}
 計算邏輯：{plan.get('plain_explanation', '')}
