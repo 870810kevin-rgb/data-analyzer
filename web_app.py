@@ -2,7 +2,7 @@
 import sys
 import io
 
-# 【第一道防線】強制 Python 系統輸出與錯誤流使用 UTF-8
+# 強制 UTF-8
 if sys.stdout.encoding != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 if sys.stderr.encoding != 'utf-8':
@@ -17,7 +17,7 @@ import os
 from datetime import datetime
 from openai import OpenAI
 
-# 【第二道防線】清除可能干擾的系統代理變數
+# 清除代理
 for env_var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]:
     os.environ.pop(env_var, None)
 os.environ["NO_PROXY"] = "*"
@@ -26,7 +26,7 @@ os.environ["NO_PROXY"] = "*"
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    RAW_API_KEY = "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" # 本地測試用
+    RAW_API_KEY = "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" 
 
 GROQ_API_KEY = RAW_API_KEY.encode("ascii", errors="ignore").decode("ascii").strip()
 client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
@@ -38,19 +38,8 @@ FREE_LIMIT = 3
 # ==========================================
 
 st.set_page_config(page_title="Data Analyzer | 智能數據分析", page_icon="📊", layout="wide")
-
-st.markdown("""
-    <style>
-    .stApp { max-width: 1100px; margin: 0 auto; }
-    .stButton>button { width: 100%; border-radius: 8px; height: 50px; font-weight: bold; }
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    </style>
-""", unsafe_allow_html=True)
-
 st.title("📊 Data Analyzer | 智能數據分析工具")
 st.markdown("🔒 **Local Computing · Data Privacy Guaranteed** | **本地端計算 · 數據絕對安全**")
-st.markdown("🚀 **New: Predictive Trend & Anomaly Detection** | **全新：趨勢預測與異常檢測**")
 st.divider()
 
 # ================= 核心狀態管理 =================
@@ -128,6 +117,7 @@ def execute_local(df, plan):
     d = df.copy()
     op, gb, target = plan.get("operator"), plan.get("group_by"), plan.get("target_col")
     
+    # 【修復重點 1】把 AI 回傳的 List 強制壓成單一字串
     if isinstance(gb, list) and len(gb) > 0: gb = str(gb[0])
     if isinstance(target, list) and len(target) > 0: target = str(target[0])
     if gb in ["null", "None", "無", ""]: gb = None
@@ -141,11 +131,10 @@ def execute_local(df, plan):
     if target not in d.columns: raise ValueError(f"找不到欄位：{target}")
     d[target] = pd.to_numeric(d[target], errors='coerce').fillna(0)
 
+    # 【修復重點 2】如果選了 trend 但找不到時間，自動降級為 groupby_sum
     if op == "trend":
-        # 【優化】擴充時間欄位的辨識能力，包含「年」、「月」、「季」
         time_col = next((c for c in d.columns if 'date' in str(c).lower() or '日期' in str(c) or '時間' in str(c) or '年' in str(c) or '月' in str(c)), None)
         if time_col:
-            # 嘗試轉換為日期格式，若失敗則保留原字串
             try:
                 d[time_col] = pd.to_datetime(d[time_col], errors='coerce')
                 d['_month'] = d[time_col].dt.to_period('M').astype(str)
@@ -156,9 +145,14 @@ def execute_local(df, plan):
             agg.columns = ['_month', f'{target}_sum', f'{target}_mean', f'{target}_count']
             return agg, "_month"
         else: 
-            return pd.DataFrame([{"提示": "找不到時間或年份欄位，無法進行趨勢分析"}]), None
+            # 如果找不到時間，就強制改成 groupby_sum（前提是有 group_by）
+            if gb and gb in d.columns:
+                plan["operator"] = "groupby_sum" 
+                op = "groupby_sum"
+            else:
+                return pd.DataFrame([{"提示": "找不到時間欄位，且無分組欄位可進行加總"}]), None
 
-    elif op == "groupby_ratio" and gb and gb in d.columns:
+    if op == "groupby_ratio" and gb and gb in d.columns:
         agg = d.groupby(gb)[target].sum().reset_index()
         total = agg[target].sum() if agg[target].sum() != 0 else 1
         agg[f'{target}_ratio'] = (agg[target] / total * 100).round(2).astype(str) + '%'
@@ -216,11 +210,13 @@ if st.session_state.df is not None:
                         sample_data = st.session_state.df.head(3).to_dict(orient="records")
                         col_info = [f"{col}({'數值' if pd.api.types.is_numeric_dtype(st.session_state.df[col]) else '文字'})" for col in st.session_state.df.columns]
                         
+                        # 【修復重點 3】在 Prompt 加入強烈警告
                         prompt = f"""你是一個數據分析專家。請根據以下資訊生成分析計畫。
 【欄位】{', '.join(col_info)}
 【樣本】{str(sample_data)}
 【問題】{question}
 【任務】只能選這六個算子之一：groupby_mean, groupby_sum, groupby_ratio, groupby_count, trend, anomaly。
+【嚴格警告】如果資料表中沒有包含「日期」、「時間」或「年份」的獨立欄位，請絕對不要使用 trend。
 只返回嚴格 JSON 包含：operator, group_by, target_col, assumptions, plain_explanation。"""
 
                         plan = None
