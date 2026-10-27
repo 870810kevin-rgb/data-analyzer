@@ -26,7 +26,7 @@ os.environ["NO_PROXY"] = "*"
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    RAW_API_KEY = "gsk_你的Groq密钥" 
+    RAW_API_KEY = "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" 
 
 # 強制清洗 API Key 確保沒有隱藏字元
 GROQ_API_KEY = RAW_API_KEY.encode("ascii", errors="ignore").decode("ascii").strip()
