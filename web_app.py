@@ -1,11 +1,26 @@
 # web_app.py
+import sys
+import io
+
+# 【第一道防線】強制 Python 系統輸出與錯誤流使用 UTF-8
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import json
 import uuid
+import os
 from datetime import datetime
 from openai import OpenAI
+
+# 【第二道防線】清除可能干擾的系統代理變數
+for env_var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]:
+    os.environ.pop(env_var, None)
+os.environ["NO_PROXY"] = "*"
 
 # ================= 配置區 =================
 try:
@@ -13,7 +28,10 @@ try:
 except Exception:
     RAW_API_KEY = "gsk_你的Groq密钥" 
 
-client = OpenAI(api_key=RAW_API_KEY.strip(), base_url="https://api.groq.com/openai/v1")
+# 強制清洗 API Key 確保沒有隱藏字元
+GROQ_API_KEY = RAW_API_KEY.encode("ascii", errors="ignore").decode("ascii").strip()
+
+client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 MODEL_NAME = "openai/gpt-oss-120b"
 
 PAYMENT_LINK = "https://your-payment-link.com" 
@@ -178,12 +196,14 @@ if st.session_state.df is not None:
             with st.chat_message("assistant"):
                 with st.spinner("Analyzing | 正在深度分析與計算..."):
                     try:
+                        # 【修復重點】將 DataFrame 轉為 JSON 字串前，確保編碼正確
                         sample_data = st.session_state.df.head(3).to_dict(orient="records")
                         col_info = [f"{col}({'數值' if pd.api.types.is_numeric_dtype(st.session_state.df[col]) else '文字'})" for col in st.session_state.df.columns]
                         
+                        # 將 Prompt 轉為純字串
                         prompt = f"""你是一個數據分析專家。請根據以下資訊生成分析計畫。
 【欄位】{', '.join(col_info)}
-【樣本】{sample_data}
+【樣本】{str(sample_data)}
 【問題】{question}
 【任務】只能選這六個算子之一：groupby_mean, groupby_sum, groupby_ratio, groupby_count, trend, anomaly。
 只返回嚴格 JSON 包含：operator, group_by, target_col, assumptions, plain_explanation。"""
@@ -191,7 +211,11 @@ if st.session_state.df is not None:
                         plan = None
                         for _ in range(2):
                             try:
-                                resp = client.chat.completions.create(model=MODEL_NAME, messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
+                                resp = client.chat.completions.create(
+                                    model=MODEL_NAME, 
+                                    messages=[{"role": "user", "content": prompt}], 
+                                    response_format={"type": "json_object"}
+                                )
                                 plan = json.loads(resp.choices[0].message.content)
                                 break
                             except Exception as e:
@@ -208,7 +232,7 @@ if st.session_state.df is not None:
                             elif f'{target_col}_mean' in result_df.columns: y_col_for_chart = f'{target_col}_mean'
                             elif f'{target_col}_count' in result_df.columns: y_col_for_chart = f'{target_col}_count'
                             
-                            # 【終極防呆】嚴格要求 AI 不准偷懶
+                            # 確保結論 Prompt 轉為純字串
                             conc_prompt = f"""你是一位專業的數據分析師。
 用戶問：{question}
 計算邏輯：{plan.get('plain_explanation', '')}
@@ -225,7 +249,6 @@ if st.session_state.df is not None:
                             resp2 = client.chat.completions.create(model=MODEL_NAME, messages=[{"role": "user", "content": conc_prompt}], max_tokens=500)
                             conclusion = resp2.choices[0].message.content.strip()
                             
-                            # 【終極防呆】如果 AI 回傳字數太少（例如小於 20 個字），強制重試一次
                             if len(conclusion) < 20:
                                 resp2 = client.chat.completions.create(model=MODEL_NAME, messages=[{"role": "user", "content": conc_prompt + "\n請注意：你剛剛的回覆太短了，請嚴格按照格式產出有數字的洞察！"}], max_tokens=500)
                                 conclusion = resp2.choices[0].message.content.strip()
