@@ -11,14 +11,18 @@ from openai import OpenAI
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    RAW_API_KEY = "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" # 本地測試用
+    RAW_API_KEY = "gsk_你的Groq密钥" # 本地測試用
 
+# 初始化 Groq Client
 client = OpenAI(api_key=RAW_API_KEY.strip(), base_url="https://api.groq.com/openai/v1")
-MODEL_NAME = "openai/gpt-oss-120b"
 
+# 【模型選擇】推薦使用 llama-3.3-70b-versatile，若想省錢可改為 llama-3.1-8b-instant
+MODEL_NAME = "llama-3.3-70b-versatile"
+
+# 金流付款連結
 PAYMENT_LINK = "https://your-payment-link.com" 
 
-# 付費會員名單
+# 【付費會員名單】對應的 Email 與到期日
 PAID_USERS = {
     "boss@example.com": "2026-12-31", 
 }
@@ -41,19 +45,23 @@ st.markdown("🔒 **Local Computing · Data Privacy Guaranteed** | **本地端�
 st.markdown("🚀 **New: Predictive Trend & Anomaly Detection** | **全新：趨勢預測與異常檢測**")
 st.divider()
 
-# ================= 核心狀態管理 =================
+# ================= 核心狀態管理 (防重整重置) =================
 @st.cache_resource
 def get_global_tracker():
+    # 這個字典會存在伺服器記憶體，不會因為 F5 重新整理而消失
     return {}
 
 tracker = get_global_tracker()
 
+# 獲取登入狀態 (需安裝 streamlit[auth])
 is_logged_in = st.user.is_logged_in if hasattr(st.user, "is_logged_in") else False
 user_email = st.user.email if is_logged_in else None
 
+# 給未登入者一個專屬瀏覽器 ID
 if "browser_id" not in st.session_state:
     st.session_state.browser_id = str(uuid.uuid4())
 
+# 判斷計數器 Key (登入用 Email，未登入用 Browser ID)
 tracker_key = user_email if is_logged_in else st.session_state.browser_id
 
 if tracker_key not in tracker:
@@ -61,6 +69,7 @@ if tracker_key not in tracker:
 
 usage_count = tracker[tracker_key]
 
+# 判斷是否付費
 is_paid = False
 if is_logged_in and user_email in PAID_USERS:
     expiry = datetime.strptime(PAID_USERS[user_email], "%Y-%m-%d").date()
@@ -69,6 +78,7 @@ if is_logged_in and user_email in PAID_USERS:
 
 has_free_quota = is_paid or (usage_count < FREE_LIMIT)
 
+# 初始化資料狀態
 if "df" not in st.session_state:
     st.session_state.df = None
 if "messages" not in st.session_state:
@@ -86,7 +96,8 @@ with st.sidebar:
         st.success(f"Logged in as:\n**{user_email}**")
         if st.button("Logout | 登出"):
             st.logout()
-            st.session_state.browser_id = str(uuid.uuid4()) # 登出後換新 ID
+            # 登出時重置瀏覽器 ID，避免沿用登入時的次數狀態
+            st.session_state.browser_id = str(uuid.uuid4()) 
             st.rerun()
             
         if is_paid:
@@ -115,7 +126,7 @@ with st.sidebar:
             st.session_state.df = df
             st.success(f"✅ Loaded: {uploaded_file.name}")
             
-            # 【恢復預覽功能】
+            # 數據預覽功能
             st.markdown(f"**Data Dimensions | 數據維度：** `{len(df)} rows` × `{len(df.columns)} columns`")
             with st.expander("🔍 Preview Data | 預覽數據 (前 5 行)"):
                 st.dataframe(df.head(), use_container_width=True)
@@ -129,20 +140,21 @@ with st.sidebar:
             st.session_state.messages = []
             st.rerun()
 
+    # 升級付費區塊
     if is_logged_in and not is_paid:
         st.divider()
         st.markdown("### 🔓 Upgrade to Pro | 升級專業版")
         st.link_button("💳 Pay Now | 立即付款", PAYMENT_LINK)
 
 
-# ================= 升級版核心計算引擎 =================
+# ================= 核心計算引擎 =================
 def execute_local(df, plan):
     d = df.copy()
     op = plan.get("operator")
     gb = plan.get("group_by")
     target = plan.get("target_col")
     
-    # 處理 AI 回傳格式
+    # 防呆：處理 AI 回傳的格式
     if isinstance(gb, list): gb = gb[0] if len(gb) > 0 else None
     if isinstance(gb, str) and gb.strip() in ["null", "None", "無", ""]: gb = None
     if isinstance(target, list): target = target[0] if len(target) > 0 else None
@@ -155,7 +167,7 @@ def execute_local(df, plan):
 
     if target not in d.columns: raise ValueError(f"找不到欄位：{target}")
     
-    # 確保目標欄位是數字
+    # 確保目標欄位是數字格式
     d[target] = pd.to_numeric(d[target], errors='coerce').fillna(0)
 
     # 1. 趨勢分析 (Trend)
@@ -174,12 +186,12 @@ def execute_local(df, plan):
     elif op == "groupby_ratio" and gb and gb in d.columns:
         agg = d.groupby(gb)[target].sum().reset_index()
         total = agg[target].sum()
+        if total == 0: total = 1 # 避免除以零
         agg[f'{target}_ratio'] = (agg[target] / total * 100).round(2).astype(str) + '%'
         return agg.sort_values(by=target, ascending=False).head(10), gb
 
     # 3. 異常檢測 (Anomaly)
     elif op == "anomaly" and gb and gb in d.columns:
-        # 計算該組的總和，並找出大於「平均值 + 2個標準差」的極端值
         agg = d.groupby(gb)[target].sum().reset_index()
         mean_val = agg[target].mean()
         std_val = agg[target].std()
@@ -190,9 +202,9 @@ def execute_local(df, plan):
             return pd.DataFrame([{"提示": "未檢測到明顯異常值"}]), gb
         return anomalies, gb
 
-    # 4. 一般分組 (Mean / Sum / Count / Rank)
+    # 4. 一般分組
     elif op in ["groupby_mean", "groupby_sum", "groupby_count", "rank"] and gb and gb in d.columns:
-        if op == "groupby_mean" or op == "rank":
+        if op in ["groupby_mean", "rank"]:
             agg = d.groupby(gb)[target].mean().reset_index()
         elif op == "groupby_sum":
             agg = d.groupby(gb)[target].sum().reset_index()
@@ -201,19 +213,18 @@ def execute_local(df, plan):
         return agg.sort_values(by=target, ascending=False).head(10), gb
         
     else:
-        # 如果沒分組，回傳整體總計
         if op == "groupby_sum": return pd.DataFrame([{f"{target} 總和": d[target].sum()}]), None
         else: return pd.DataFrame([{f"{target} 平均值": d[target].mean()}]), None
 
 # ================= 主畫面 =================
 if st.session_state.df is not None:
+    # 顯示歷史對話
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if "chart_data" in message:
                 chart_data = pd.DataFrame(message["chart_data"])
                 if message.get("x_col") and message.get("target_col"):
-                    # 趨勢圖用折線圖，一般分組用柱狀圖
                     if message.get("op") == "trend":
                         st.line_chart(data=chart_data, x=message["x_col"], y=message["target_col"], color="#FF4B4B")
                     else:
@@ -223,6 +234,7 @@ if st.session_state.df is not None:
                     st.json(message["whitebox_plan"])
                     st.dataframe(pd.DataFrame(message["whitebox_df"]), use_container_width=True)
 
+    # 額度阻擋邏輯
     if not has_free_quota:
         st.warning("⚠️ **Free trial limit reached. | 免費試用次數已達上限。**")
         if not is_logged_in:
@@ -231,7 +243,7 @@ if st.session_state.df is not None:
             st.markdown(f"👉 **Please upgrade to Pro to continue analyzing. | 請升級為專業版以繼續分析。**\n\n[👉 Click here to Pay | 點此前往付款]({PAYMENT_LINK})")
             
     else:
-        if question := st.chat_input("Ask a question... | 輸入您的問題（例如：預測下個月的趨勢）"):
+        if question := st.chat_input("Ask a question... | 輸入您的問題（例如：哪條路線最塞？）"):
             if not is_paid:
                 tracker[tracker_key] += 1
                 
@@ -242,20 +254,32 @@ if st.session_state.df is not None:
             with st.chat_message("assistant"):
                 with st.spinner("Analyzing | 正在深度分析與計算..."):
                     try:
-                        columns = list(st.session_state.df.columns)
-                        # 升級版 Prompt：加入新的算子
-                        prompt = f"""表列名：{columns}
-用戶的問題：{question}
+                        # 【Token 優化】只取前 3 行，加上資料型態標示
+                        sample_data = st.session_state.df.head(3).to_dict(orient="records")
+                        col_info = []
+                        for col in st.session_state.df.columns:
+                            dtype = "數值" if pd.api.types.is_numeric_dtype(st.session_state.df[col]) else "文字"
+                            col_info.append(f"{col}({dtype})")
+                        
+                        prompt = f"""你是一個數據分析專家。請根據以下資訊，為用戶的問題生成分析計畫。
+【數據欄位與型態】
+{', '.join(col_info)}
+【數據樣本 (前3筆)】
+{sample_data}
+【用戶問題】
+{question}
+【任務指令】
 請判斷要用哪種分析。只能選這六個英文單字之一：
 - groupby_mean (分組算平均)
 - groupby_sum (分組加總)
 - groupby_ratio (分組算佔比)
 - groupby_count (分組算數量)
-- trend (時間趨勢分析)
+- trend (時間趨勢)
 - anomaly (異常值檢測)
-只返回嚴格 JSON，包含：operator, group_by, target_col, assumptions, plain_explanation。請使用繁體中文。"""
+只返回嚴格 JSON，包含：operator, group_by, target_col, assumptions, plain_explanation。解釋請用繁體中文。"""
 
-                        # 加入自動重試機制
+                        # 自動重試機制
+                        plan = None
                         for _ in range(2):
                             try:
                                 resp = client.chat.completions.create(
@@ -272,13 +296,11 @@ if st.session_state.df is not None:
                         
                         if result_df is not None and not result_df.empty:
                             target_col = plan.get("target_col")
-                            # 處理圖表 Y 軸對應的欄位名稱
                             y_col_for_chart = target_col
                             if f'{target_col}_sum' in result_df.columns: y_col_for_chart = f'{target_col}_sum'
                             elif f'{target_col}_mean' in result_df.columns: y_col_for_chart = f'{target_col}_mean'
                             elif f'{target_col}_count' in result_df.columns: y_col_for_chart = f'{target_col}_count'
                             
-                            # 生成結論
                             conc_prompt = f"""用戶問：{question}
 計算邏輯：{plan.get('plain_explanation', '')}
 結果數據：\n{result_df.head(10).to_string()}
@@ -296,13 +318,14 @@ if st.session_state.df is not None:
                                 "whitebox_plan": plan, "whitebox_df": chart_data, "op": plan.get("operator")
                             })
                             
-                            # 根據算子畫不同的圖表
+                            # 畫圖表
                             if x_col and y_col_for_chart and y_col_for_chart in result_df.columns:
                                 if plan.get("operator") == "trend":
                                     st.line_chart(data=result_df, x=x_col, y=y_col_for_chart, color="#FF4B4B")
                                 else:
                                     st.bar_chart(data=result_df, x=x_col, y=y_col_for_chart, color="#2FA572")
                             
+                            # 白箱
                             with st.expander("🔍 White Box | 白箱計算依據"):
                                 st.json(plan)
                                 st.dataframe(result_df, use_container_width=True)
