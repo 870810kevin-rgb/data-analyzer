@@ -11,7 +11,8 @@ from openai import OpenAI
 try:
     RAW_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    RAW_API_KEY = "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" # 本地測試用，請填入你的真實 Key
+    RAW_API_KEY = "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
+" # 本地測試用，請填入你的真實 Key
 
 # 初始化 Groq Client
 client = OpenAI(api_key=RAW_API_KEY.strip(), base_url="https://api.groq.com/openai/v1")
@@ -146,10 +147,14 @@ def execute_local(df, plan):
     gb = plan.get("group_by")
     target = plan.get("target_col")
     
-    if isinstance(gb, list): gb = gb[0] if len(gb) > 0 else None
-    if isinstance(gb, str) and gb.strip() in ["null", "None", "無", ""]: gb = None
-    if isinstance(target, list): target = target[0] if len(target) > 0 else None
-    if isinstance(target, str) and target.strip() in ["null", "None", "無", ""]: target = None
+    # 【修復核心 Bug】嚴格清洗 AI 回傳的格式，強制轉成字串
+    if isinstance(gb, list) and len(gb) > 0: gb = str(gb[0])
+    elif gb is not None: gb = str(gb)
+    if isinstance(target, list) and len(target) > 0: target = str(target[0])
+    elif target is not None: target = str(target)
+
+    if gb in ["null", "None", "無", ""]: gb = None
+    if target in ["null", "None", "無", ""]: target = None
 
     if not target:
         num_cols = d.select_dtypes(include=[np.number]).columns.tolist()
@@ -207,13 +212,22 @@ if st.session_state.df is not None:
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            
             if "chart_data" in message:
                 chart_data = pd.DataFrame(message["chart_data"])
-                if message.get("x_col") and message.get("target_col"):
+                x_c = message.get("x_col")
+                y_c = message.get("target_col")
+                
+                # 【修復核心 Bug】確保圖表的 X 軸與 Y 軸絕對是字串
+                if isinstance(x_c, list) and len(x_c) > 0: x_c = str(x_c[0])
+                if isinstance(y_c, list) and len(y_c) > 0: y_c = str(y_c[0])
+                
+                if x_c and y_c and x_c in chart_data.columns and y_c in chart_data.columns:
                     if message.get("op") == "trend":
-                        st.line_chart(data=chart_data, x=message["x_col"], y=message["target_col"], color="#FF4B4B")
+                        st.line_chart(data=chart_data, x=x_c, y=y_c, color="#FF4B4B")
                     else:
-                        st.bar_chart(data=chart_data, x=message["x_col"], y=message["target_col"], color="#2FA572")
+                        st.bar_chart(data=chart_data, x=x_c, y=y_c, color="#2FA572")
+                        
             if "whitebox_plan" in message:
                 with st.expander("🔍 White Box | 白箱計算依據"):
                     st.json(message["whitebox_plan"])
@@ -278,12 +292,14 @@ if st.session_state.df is not None:
                         
                         if result_df is not None and not result_df.empty:
                             target_col = plan.get("target_col")
+                            # 強制清洗 target_col
+                            if isinstance(target_col, list) and len(target_col) > 0: target_col = str(target_col[0])
+                            
                             y_col_for_chart = target_col
                             if f'{target_col}_sum' in result_df.columns: y_col_for_chart = f'{target_col}_sum'
                             elif f'{target_col}_mean' in result_df.columns: y_col_for_chart = f'{target_col}_mean'
                             elif f'{target_col}_count' in result_df.columns: y_col_for_chart = f'{target_col}_count'
                             
-                            # 【修復】加入 max_tokens 防止模型思考過久導致輸出被截斷
                             conc_prompt = f"""用戶問：{question}
 計算邏輯：{plan.get('plain_explanation', '')}
 結果數據：\n{result_df.head(10).to_string()}
@@ -292,7 +308,7 @@ if st.session_state.df is not None:
                             resp2 = client.chat.completions.create(
                                 model=MODEL_NAME, 
                                 messages=[{"role": "user", "content": conc_prompt}],
-                                max_tokens=500 # 限制輸出長度，避免浪費
+                                max_tokens=500
                             )
                             conclusion = resp2.choices[0].message.content.strip()
                             
@@ -305,7 +321,10 @@ if st.session_state.df is not None:
                                 "whitebox_plan": plan, "whitebox_df": chart_data, "op": plan.get("operator")
                             })
                             
-                            if x_col and y_col_for_chart and y_col_for_chart in result_df.columns:
+                            # 畫圖表前，再次確保型態正確
+                            if isinstance(x_col, list) and len(x_col) > 0: x_col = str(x_col[0])
+                            
+                            if x_col and y_col_for_chart and x_col in result_df.columns and y_col_for_chart in result_df.columns:
                                 if plan.get("operator") == "trend":
                                     st.line_chart(data=result_df, x=x_col, y=y_col_for_chart, color="#FF4B4B")
                                 else:
